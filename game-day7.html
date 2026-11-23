@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NEON DRIFT — DAY 7 · a week of daily updates</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; padding: 0; background: #05030f; height: 100%; overflow: hidden; }
+  canvas { display: block; margin: 0 auto; height: 100vh; aspect-ratio: 9 / 16; background: #05030f; }
+</style>
+</head>
+<body>
+<canvas id="game" width="540" height="960"></canvas>
+<script>
+'use strict';
+// NEON DRIFT — DAY 7. The same tiny asteroid dodger from day one, after a
+// week of daily updates. Same map, same start, visibly more going on:
+//   Day 2 — auto-fire blaster: the ship shoots the rocks now.
+//   Day 3 — power-ups drift down: shield, double score, slow motion.
+//   Day 4 — hunter rocks: magenta rocks that steer toward the ship.
+//   Day 5 — combo multiplier: chained hits raise the score multiplier.
+//   Day 6 — juice: engine trail, explosion particles, screen shake, level banners.
+//   Day 7 — golden bonus rock, shooting stars, parallax starfield, wave counter.
+// Fly with arrow keys / WASD. Dodge, shoot, grab power-ups. Survive. Score.
+// ?autoplay=1 steers and fires the ship for you (demo mode for the video).
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+const W = 540, H = 960;
+const params = new URLSearchParams(location.search);
+const AUTOPLAY = params.get('autoplay') === '1';
+
+const ship = { x: W / 2, y: H - 160, vx: 0, vy: 0, r: 16, alive: true };
+const keys = {};
+let rocks = [];
+let shots = [];
+let sparks = [];
+let trail = [];
+let stars = [];
+let gifts = [];
+let shooters = [];
+let score = 0, lives = 3, over = false, t = 0;
+let spawnIn = 40, giftIn = 420, goldIn = 900, fireIn = 0;
+let combo = 0, comboTimer = 0, mult = 1, wave = 1, shake = 0, flash = 0;
+let shield = false, doubleUntil = 0, slowUntil = 0, levelBannerUntil = 0;
+
+for (let i = 0; i < 110; i++) {
+  stars.push({ x: Math.random() * W, y: Math.random() * H, s: Math.random() * 2 + 0.5, v: 0.4 + Math.random() * 2.2, layer: Math.random() });
+}
+
+function spawnRock(kind) {
+  const r = kind === 'gold' ? 20 : 14 + Math.random() * 26;
+  rocks.push({
+    x: r + Math.random() * (W - 2 * r),
+    y: -r - 10,
+    r: r,
+    vy: 2.2 + Math.random() * 2.4 + Math.min(2.5, score / 900),
+    vx: (Math.random() - 0.5) * 1.2,
+    rot: Math.random() * Math.PI * 2,
+    vr: (Math.random() - 0.5) * 0.04,
+    sides: 7 + Math.floor(Math.random() * 3),
+    hue: kind === 'gold' ? 48 : kind === 'hunter' ? 315 : 280 + Math.random() * 60,
+    kind: kind || 'rock',
+    hp: kind === 'gold' ? 3 : 1
+  });
+}
+
+function spawnGift() {
+  const kinds = ['shield', 'double', 'slow'];
+  const kind = kinds[Math.floor(Math.random() * kinds.length)];
+  gifts.push({ x: 40 + Math.random() * (W - 80), y: -20, vy: 1.6, kind: kind, bob: Math.random() * 6 });
+}
+
+function burst(x, y, n, color, speed) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, sp = (speed || 4) * (0.3 + Math.random());
+    sparks.push({ x: x, y: y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 20 + Math.random() * 16, color: color, size: 2 + Math.random() * 3 });
+  }
+}
+
+function reset() {
+  rocks = []; shots = []; sparks = []; gifts = []; trail = [];
+  score = 0; lives = 3; over = false; t = 0; combo = 0; mult = 1; wave = 1;
+  spawnIn = 40; giftIn = 420; goldIn = 900; fireIn = 0; shake = 0; flash = 0;
+  shield = false; doubleUntil = 0; slowUntil = 0; levelBannerUntil = 0;
+  ship.x = W / 2; ship.y = H - 160; ship.vx = 0; ship.vy = 0; ship.alive = true;
+}
+
+addEventListener('keydown', (e) => {
+  keys[e.key.toLowerCase()] = true;
+  if ((e.key === 'r' || e.key === 'R') && over) reset();
+  if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(e.key.toLowerCase())) e.preventDefault();
+});
+addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
+
+function autopilot() {
+  // Steer toward the widest gap below the nearest rock, and keep firing.
+  let threat = null;
+  for (const a of rocks) {
+    if (a.y < ship.y && a.y > ship.y - 420 && (!threat || a.y > threat.y)) threat = a;
+  }
+  keys['arrowleft'] = false; keys['arrowright'] = false;
+  keys['arrowup'] = false; keys['arrowdown'] = false;
+  if (threat) {
+    const gapLeft = threat.x - threat.r - 40;
+    const gapRight = threat.x + threat.r + 40;
+    const target = (ship.x < threat.x) ? Math.max(40, gapLeft) : Math.min(W - 40, gapRight);
+    if (ship.x < target - 12) keys['arrowright'] = true;
+    else if (ship.x > target + 12) keys['arrowleft'] = true;
+  } else if (ship.x < W / 2 - 20) {
+    keys['arrowright'] = true;
+  } else if (ship.x > W / 2 + 20) {
+    keys['arrowleft'] = true;
+  }
+  if (ship.y > H - 180) keys['arrowup'] = true;
+}
+
+function fireShot() {
+  shots.push({ x: ship.x - 10, y: ship.y - 18, vy: -11, r: 4 });
+  shots.push({ x: ship.x + 10, y: ship.y - 18, vy: -11, r: 4 });
+}
+
+function hitShip(rock) {
+  if (shield) {
+    shield = false;
+    burst(ship.x, ship.y, 30, '#00f0ff', 5);
+    shake = 10;
+    return;
+  }
+  burst(ship.x, ship.y, 26, '#ff2d78', 5);
+  burst(rock.x, rock.y, 18, '#b26bff', 4);
+  lives--; flash = 14; shake = 16; combo = 0; mult = 1;
+  ship.x = W / 2; ship.y = H - 160; ship.vx = 0; ship.vy = 0;
+  if (lives <= 0) { over = true; }
+}
+
+function update() {
+  t++;
+  const slow = t < slowUntil ? 0.5 : 1;
+  for (const s of stars) { s.y += s.v * slow * (0.5 + s.layer); if (s.y > H) { s.y = -2; s.x = Math.random() * W; } }
+  if (Math.random() < 0.004) shooters.push({ x: Math.random() * W, y: -4, vy: 6 + Math.random() * 3, life: 40 });
+  for (const st of shooters) { st.y += st.vy; st.life--; }
+  shooters = shooters.filter((st) => st.life > 0 && st.y < H);
+  if (over) {
+    for (const b of sparks) { b.x += b.vx; b.y += b.vy; b.life--; }
+    sparks = sparks.filter((b) => b.life > 0);
+    if (flash > 0) flash--;
+    if (shake > 0) shake--;
+    return;
+  }
+  score += (t < doubleUntil ? 2 : 1);
+  if (comboTimer > 0) { comboTimer--; if (comboTimer === 0) { combo = 0; mult = 1; } }
+  const newWave = 1 + Math.floor(score / 8000);
+  if (newWave > wave) { wave = newWave; levelBannerUntil = t + 90; }
+  if (AUTOPLAY) autopilot();
+  const ax = (keys['arrowright'] || keys['d'] ? 1 : 0) - (keys['arrowleft'] || keys['a'] ? 1 : 0);
+  const ay = (keys['arrowdown'] || keys['s'] ? 1 : 0) - (keys['arrowup'] || keys['w'] ? 1 : 0);
+  ship.vx += ax * 0.55; ship.vy += ay * 0.55;
+  ship.vx *= 0.88; ship.vy *= 0.88;
+  ship.x = Math.max(24, Math.min(W - 24, ship.x + ship.vx));
+  ship.y = Math.max(120, Math.min(H - 90, ship.y + ship.vy));
+  trail.push({ x: ship.x, y: ship.y + 16, life: 14 });
+  if (trail.length > 26) trail.shift();
+  for (const tr of trail) tr.life--;
+
+  if (--fireIn <= 0) { fireShot(); fireIn = 16; }
+  if (--spawnIn <= 0) {
+    spawnRock(Math.random() < 0.22 ? 'hunter' : 'rock');
+    spawnIn = Math.max(12, 34 - Math.floor(score / 300));
+  }
+  if (--giftIn <= 0) { spawnGift(); giftIn = 380 + Math.floor(Math.random() * 240); }
+  if (--goldIn <= 0) { spawnRock('gold'); goldIn = 850 + Math.floor(Math.random() * 350); }
+
+  for (const s of shots) { s.y += s.vy; }
+  shots = shots.filter((s) => s.y > -20);
+  for (const a of rocks) {
+    a.y += a.vy * slow; a.x += a.vx * slow; a.rot += a.vr;
+    if (a.kind === 'hunter') a.x += Math.sign(ship.x - a.x) * 0.7 * slow;
+    if (a.x < a.r) { a.x = a.r; a.vx = Math.abs(a.vx); }
+    if (a.x > W - a.r) { a.x = W - a.r; a.vx = -Math.abs(a.vx); }
+    for (const s of shots) {
+      const dx = s.x - a.x, dy = s.y - a.y;
+      if (dx * dx + dy * dy < (a.r + 6) * (a.r + 6)) {
+        s.y = -999;
+        a.hp--;
+        burst(s.x, s.y + 8, 8, '#ffd23f', 3);
+        if (a.hp <= 0) {
+          const pts = (a.kind === 'gold' ? 500 : 50) * mult * (t < doubleUntil ? 2 : 1);
+          score += pts;
+          combo++; comboTimer = 150;
+          mult = Math.min(5, 1 + Math.floor(combo / 4));
+          burst(a.x, a.y, a.kind === 'gold' ? 34 : 20, a.kind === 'gold' ? '#ffd23f' : '#b26bff', 5);
+          a.y = H + 999;
+        }
+        break;
+      }
+    }
+    const dx = a.x - ship.x, dy = a.y - ship.y;
+    if (dx * dx + dy * dy < (a.r + ship.r - 6) * (a.r + ship.r - 6)) {
+      rocks.splice(rocks.indexOf(a), 1);
+      hitShip(a);
+      break;
+    }
+  }
+  rocks = rocks.filter((a) => a.y < H + 60);
+  for (const g of gifts) {
+    g.y += g.vy; g.bob += 0.08;
+    const dx = g.x - ship.x, dy = g.y - ship.y;
+    if (dx * dx + dy * dy < 34 * 34) {
+      if (g.kind === 'shield') { shield = true; }
+      if (g.kind === 'double') { doubleUntil = t + 480; }
+      if (g.kind === 'slow') { slowUntil = t + 360; }
+      burst(g.x, g.y, 22, '#33ff99', 4);
+      score += 25 * mult;
+      gifts.splice(gifts.indexOf(g), 1);
+    }
+  }
+  gifts = gifts.filter((g) => g.y < H + 40);
+  for (const b of sparks) { b.x += b.vx; b.y += b.vy; b.vx *= 0.96; b.vy *= 0.96; b.life--; }
+  sparks = sparks.filter((b) => b.life > 0);
+  if (flash > 0) flash--;
+  if (shake > 0) shake--;
+}
+
+function drawRock(a) {
+  ctx.save();
+  ctx.translate(a.x, a.y);
+  ctx.rotate(a.rot);
+  ctx.beginPath();
+  for (let i = 0; i < a.sides; i++) {
+    const ang = (i / a.sides) * Math.PI * 2;
+    const rr = a.r * (0.78 + 0.22 * Math.sin(i * 2.7 + a.rot));
+    if (i === 0) ctx.moveTo(Math.cos(ang) * rr, Math.sin(ang) * rr);
+    else ctx.lineTo(Math.cos(ang) * rr, Math.sin(ang) * rr);
+  }
+  ctx.closePath();
+  ctx.fillStyle = a.kind === 'gold' ? '#3a2a00' : '#160b2e';
+  ctx.fill();
+  ctx.strokeStyle = `hsl(${a.hue} 90% ${a.kind === 'gold' ? 60 : 65}%)`;
+  ctx.lineWidth = a.kind === 'hunter' ? 3.5 : 2.5;
+  ctx.stroke();
+  if (a.kind === 'gold') {
+    ctx.fillStyle = '#ffd23f';
+    ctx.font = '700 20px "JetBrains Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('500', 0, 7);
+  }
+  ctx.restore();
+}
+
+function drawGift(g) {
+  const bobY = g.y + Math.sin(g.bob) * 4;
+  ctx.save();
+  ctx.translate(g.x, bobY);
+  ctx.shadowColor = '#33ff99'; ctx.shadowBlur = 14;
+  ctx.fillStyle = '#062b18';
+  ctx.beginPath(); ctx.arc(0, 0, 17, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = '#33ff99'; ctx.lineWidth = 2.5; ctx.stroke();
+  ctx.fillStyle = g.kind === 'shield' ? '#00f0ff' : g.kind === 'double' ? '#ffd23f' : '#b26bff';
+  ctx.font = '700 22px "JetBrains Mono", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(g.kind === 'shield' ? 'S' : g.kind === 'double' ? 'x2' : '◐', 0, 8);
+  ctx.restore();
+}
+
+function drawShip() {
+  ctx.save();
+  ctx.translate(ship.x, ship.y);
+  ctx.rotate(ship.vx * 0.03);
+  if (shield) {
+    ctx.strokeStyle = 'rgba(0, 240, 255, 0.85)';
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(0, 0, 30 + Math.sin(t * 0.15) * 2, 0, Math.PI * 2); ctx.stroke();
+  }
+  ctx.shadowColor = '#00f0ff'; ctx.shadowBlur = 18;
+  ctx.fillStyle = '#00f0ff';
+  ctx.beginPath();
+  ctx.moveTo(0, -22); ctx.lineTo(15, 16); ctx.lineTo(0, 7); ctx.lineTo(-15, 16);
+  ctx.closePath(); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#ff2d78';
+  ctx.beginPath(); ctx.arc(0, -2, 4.5, 0, Math.PI * 2); ctx.fill();
+  const f = 10 + Math.random() * 12;
+  ctx.fillStyle = 'rgba(255, 170, 40, 0.9)';
+  ctx.beginPath(); ctx.moveTo(-6, 14); ctx.lineTo(0, 14 + f); ctx.lineTo(6, 14); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+function draw() {
+  ctx.save();
+  if (shake > 0) ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake);
+  ctx.fillStyle = '#05030f';
+  ctx.fillRect(-20, -20, W + 40, H + 40);
+  ctx.fillStyle = '#ffffff';
+  for (const s of stars) { ctx.globalAlpha = 0.25 + s.s * 0.25; ctx.fillRect(s.x, s.y, s.s, s.s); }
+  ctx.globalAlpha = 1;
+  const g = ctx.createRadialGradient(W * 0.8, H * 0.2, 10, W * 0.8, H * 0.2, 320);
+  g.addColorStop(0, 'rgba(178, 107, 255, 0.20)'); g.addColorStop(1, 'rgba(178, 107, 255, 0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  const g2 = ctx.createRadialGradient(W * 0.15, H * 0.75, 10, W * 0.15, H * 0.75, 300);
+  g2.addColorStop(0, 'rgba(0, 240, 255, 0.10)'); g2.addColorStop(1, 'rgba(0, 240, 255, 0)');
+  ctx.fillStyle = g2; ctx.fillRect(0, 0, W, H);
+  const g3 = ctx.createRadialGradient(W * 0.5, H * 0.45, 10, W * 0.5, H * 0.45, 260);
+  g3.addColorStop(0, 'rgba(255, 45, 120, 0.08)'); g3.addColorStop(1, 'rgba(255, 45, 120, 0)');
+  ctx.fillStyle = g3; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
+  ctx.lineWidth = 2;
+  for (const st of shooters) {
+    ctx.beginPath(); ctx.moveTo(st.x, st.y); ctx.lineTo(st.x - 14, st.y - 34); ctx.stroke();
+  }
+  for (const tr of trail) {
+    ctx.globalAlpha = Math.max(0, tr.life / 14) * 0.5;
+    ctx.fillStyle = '#00f0ff';
+    ctx.beginPath(); ctx.arc(tr.x, tr.y, 5, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  for (const a of rocks) drawRock(a);
+  for (const gf of gifts) drawGift(gf);
+  for (const s of shots) {
+    ctx.fillStyle = '#ffd23f';
+    ctx.shadowColor = '#ffd23f'; ctx.shadowBlur = 8;
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+  for (const b of sparks) {
+    ctx.globalAlpha = Math.max(0, b.life / 30);
+    ctx.fillStyle = b.color;
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.size, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  if (!over) drawShip();
+
+  // HUD — day seven: score, combo, wave, lives, shield, power-up timers.
+  ctx.fillStyle = '#00f0ff';
+  ctx.font = '700 34px "JetBrains Mono", monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('SCORE ' + score, 20, 52);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#ff2d78';
+  ctx.fillText('♥'.repeat(Math.max(0, lives)) + '♡'.repeat(Math.max(0, 3 - lives)), W - 20, 52);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.font = '700 22px "JetBrains Mono", monospace';
+  ctx.fillText('N E O N   D R I F T  ·  DAY 7', W / 2, 92);
+  ctx.fillStyle = '#ffd23f';
+  ctx.font = '700 26px "JetBrains Mono", monospace';
+  ctx.fillText('WAVE ' + wave + (mult > 1 ? '   COMBO x' + mult : '') + (shield ? '   🛡' : ''), W / 2, 128);
+  if (t < doubleUntil || t < slowUntil) {
+    ctx.fillStyle = '#33ff99';
+    ctx.font = '700 22px "JetBrains Mono", monospace';
+    const left = [];
+    if (t < doubleUntil) left.push('2x SCORE ' + Math.ceil((doubleUntil - t) / 60) + 's');
+    if (t < slowUntil) left.push('SLOW-MO ' + Math.ceil((slowUntil - t) / 60) + 's');
+    ctx.fillText(left.join('   '), W / 2, 160);
+  }
+  if (wave > 1 && t < levelBannerUntil) {
+    ctx.fillStyle = 'rgba(255, 210, 63, 0.95)';
+    ctx.font = '700 44px "JetBrains Mono", monospace';
+    ctx.fillText('LEVEL ' + wave, W / 2, H / 2 - 120);
+  }
+
+  if (over) {
+    ctx.fillStyle = 'rgba(5, 3, 15, 0.72)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#ff2d78';
+    ctx.font = '700 64px "JetBrains Mono", monospace';
+    ctx.fillText('GAME OVER', W / 2, H / 2 - 40);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '700 40px "JetBrains Mono", monospace';
+    ctx.fillText('SCORE ' + score, W / 2, H / 2 + 30);
+    ctx.fillStyle = '#00f0ff';
+    ctx.font = '700 26px "JetBrains Mono", monospace';
+    ctx.fillText('press R to fly again', W / 2, H / 2 + 90);
+  }
+  if (flash > 0) {
+    ctx.fillStyle = `rgba(255, 45, 120, ${flash / 40})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+  ctx.restore();
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
